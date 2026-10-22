@@ -1,22 +1,29 @@
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode, type Ref } from 'react';
+import L from 'leaflet';
+import { AttributionControl, Circle, MapContainer, Marker, Polyline, TileLayer } from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
 import type { LatLng, TrackingStatus } from '@/api/types';
-import { offsetM } from '@/utils/geo';
+import { distanceM, moveM, offsetM } from '@/utils/geo';
 
 /**
- * Mapa ilustrado do design. O fundo (ruas, parques, água) é decorativo, mas
- * o círculo da área segura e o marcador do animal são posicionados em escala
- * a partir dos dados reais (centro, raio e última posição).
+ * Mapa real (Leaflet + tiles do OpenStreetMap). O círculo da área segura, a casa
+ * e o marcador do animal vêm direto das coordenadas recebidas por props, então
+ * basta atualizar `pet.position` (polling, WebSocket, SSE…) para o marcador andar.
  *
- * Para trocar por um mapa de verdade (Leaflet, Google Maps, Mapbox), mantenha
- * esta mesma interface de props e substitua a implementação.
+ * Enquadramento: o mapa se ajusta sozinho à área + animal. Nas variantes
+ * interativas, depois que o usuário arrasta/dá zoom, novas posições do animal não
+ * mexem mais na câmera até `recenter()` ser chamado (via `ref`).
  */
 
 type Variant = 'card' | 'large' | 'form';
 
+export interface MapViewHandle {
+  /** Volta a enquadrar área + animal e retoma o acompanhamento automático. */
+  recenter(): void;
+}
+
 interface Props {
   variant: Variant;
-  /** Escolhe um dos traçados de rua do fundo (cartões da tela inicial). */
-  layout?: number;
   center: LatLng | null;
   radiusM: number;
   pet?: { position: LatLng | null; initial: string; status: TrackingStatus } | null;
@@ -24,190 +31,229 @@ interface Props {
   home?: 'small' | 'large' | false;
   /** Mostra a alça no raio (tela de editar área). */
   handle?: boolean;
-  /** Raio do círculo em px do viewBox. Padrão: tamanho fixo, com o animal em escala relativa. */
-  ringPx?: number;
+  /** Toque no mapa ou arraste da casa. Sem isso, a casa fica fixa. */
+  onCenterChange?(center: LatLng): void;
+  /** Arraste da alça (requer `handle`). */
+  onRadiusChange?(radiusM: number): void;
+  /** Limites aplicados ao arrastar a alça. */
+  radiusLimits?: [min: number, max: number];
   height: number | string;
   children?: ReactNode;
+  ref?: Ref<MapViewHandle>;
 }
 
-const SIZES: Record<Variant, { w: number; h: number; ring: number }> = {
-  card: { w: 342, h: 140, ring: 46 },
-  form: { w: 342, h: 150, ring: 52 },
-  large: { w: 390, h: 420, ring: 92 },
+const TILE_URL = (import.meta.env.VITE_MAP_TILE_URL as string | undefined) || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const TILE_ATTRIBUTION =
+  (import.meta.env.VITE_MAP_ATTRIBUTION as string | undefined) || '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+
+/** Vista quando ainda não há nenhuma coordenada (Brasil inteiro). */
+const FALLBACK_VIEW = { center: { lat: -14.235, lng: -51.925 }, zoom: 4 };
+const POINT_ZOOM = 17;
+const MAX_FIT_ZOOM = 18;
+
+// Leaflet escreve as cores como atributos SVG, então usamos os valores dos tokens.
+const BLUE = '#1f4fd1';
+const AMBER = '#e5a100';
+const GRAY = '#9aa2ae';
+
+/** Folga nas bordas para os controles sobrepostos de cada variante: topo, direita, base, esquerda. */
+const PADDING: Record<Variant, [number, number, number, number]> = {
+  card: [44, 24, 24, 24],
+  form: [20, 20, 44, 20],
+  large: [80, 76, 88, 24],
 };
 
-function Background({ variant, layout, muted }: { variant: Variant; layout: number; muted: boolean }) {
-  if (variant === 'large') {
-    return (
-      <>
-        <rect width="390" height="420" fill="var(--map-ground)" />
-        <rect x="250" y="250" width="120" height="90" rx="14" fill="var(--map-park)" />
-        <rect x="20" y="20" width="70" height="60" rx="10" fill="var(--map-park)" />
-        <path d="M0 370 C70 350 140 390 210 370 S330 352 390 372 V420 H0Z" fill="var(--map-water)" />
-        <g stroke="#FFFFFF" strokeLinecap="round" fill="none">
-          <path d="M-5 120 H395" strokeWidth="14" />
-          <path d="M130 -5 V425" strokeWidth="14" />
-          <path d="M-5 300 L395 220" strokeWidth="9" />
-          <path d="M310 -5 V425" strokeWidth="9" />
-          <path d="M-5 210 H130" strokeWidth="6" />
-          <path d="M200 -5 V140" strokeWidth="6" />
-        </g>
-      </>
-    );
-  }
-  if (variant === 'form') {
-    return (
-      <>
-        <rect width="342" height="150" fill="var(--map-ground)" />
-        <rect x="218" y="88" width="96" height="50" rx="10" fill="var(--map-park)" />
-        <path d="M0 132 C60 118 120 146 180 132 S290 122 342 136 V150 H0Z" fill="var(--map-water)" />
-        <g stroke="#FFFFFF" strokeLinecap="round" fill="none">
-          <path d="M-5 52 H350" strokeWidth="10" />
-          <path d="M112 -5 V155" strokeWidth="10" />
-          <path d="M-5 108 L350 72" strokeWidth="6" />
-          <path d="M262 -5 V155" strokeWidth="6" />
-        </g>
-      </>
-    );
-  }
-  if (muted) {
-    return (
-      <>
-        <rect width="342" height="140" fill="#F0F1F3" />
-        <rect x="200" y="14" width="100" height="44" rx="10" fill="#E3E6E9" />
-        <g stroke="#FFFFFF" strokeLinecap="round" fill="none">
-          <path d="M-5 76 H350" strokeWidth="10" />
-          <path d="M70 -5 L110 145" strokeWidth="8" />
-          <path d="M240 -5 V145" strokeWidth="6" />
-        </g>
-      </>
-    );
-  }
-  return layout % 2 === 0 ? (
-    <>
-      <rect width="342" height="140" fill="var(--map-ground)" />
-      <rect x="222" y="80" width="92" height="48" rx="10" fill="var(--map-park)" />
-      <path d="M0 124 C60 110 120 138 180 124 S290 114 342 128 V140 H0Z" fill="var(--map-water)" />
-      <g stroke="#FFFFFF" strokeLinecap="round" fill="none">
-        <path d="M-5 48 H350" strokeWidth="10" />
-        <path d="M108 -5 V145" strokeWidth="10" />
-        <path d="M-5 100 L350 66" strokeWidth="6" />
-        <path d="M268 -5 V145" strokeWidth="6" />
-      </g>
-    </>
-  ) : (
-    <>
-      <rect width="342" height="140" fill="var(--map-ground)" />
-      <rect x="20" y="78" width="80" height="50" rx="10" fill="var(--map-park)" />
-      <g stroke="#FFFFFF" strokeLinecap="round" fill="none">
-        <path d="M-5 40 L350 58" strokeWidth="10" />
-        <path d="M150 -5 V145" strokeWidth="10" />
-        <path d="M-5 112 H350" strokeWidth="6" />
-        <path d="M280 -5 L250 145" strokeWidth="6" />
-      </g>
-    </>
-  );
+const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+function petIcon(status: TrackingStatus, initial: string, big: boolean) {
+  const size = big ? 68 : 44;
+  return L.divIcon({
+    className: 'map-icon',
+    iconSize: [size, size],
+    html: `<span class="map-pet map-pet--${status}${big ? ' map-pet--big' : ''}"><span>${escapeHtml(initial)}</span></span>`,
+  });
 }
 
-const PET_COLOR: Record<TrackingStatus, string> = {
-  tracking: 'var(--blue)',
-  outside: 'var(--orange-bright)',
-  no_signal: '#9AA2AE',
-};
+const HOUSE = '<svg viewBox="0 0 16 12" aria-hidden="true"><path d="M2 11V6l6-5 6 5v5z"/></svg>';
 
-export function MapView({ variant, layout = 0, center, radiusM, pet, home = false, handle, ringPx, height, children }: Props) {
-  const { w, h } = SIZES[variant];
-  const ring = ringPx ?? SIZES[variant].ring;
-  const cx = w / 2;
-  const cy = h / 2;
-  const muted = pet?.status === 'no_signal';
-  const scale = ring / Math.max(radiusM, 1);
+function homeIcon(kind: 'small' | 'large', draggable: boolean) {
+  const size = kind === 'large' ? 36 : 26;
+  return L.divIcon({
+    className: `map-icon${draggable ? ' map-icon--grab' : ''}`,
+    iconSize: [size, size],
+    html: `<span class="map-home map-home--${kind}">${HOUSE}</span>`,
+  });
+}
+
+const handleIcon = L.divIcon({ className: 'map-icon map-icon--resize', iconSize: [22, 22], html: '<span class="map-handle"></span>' });
+
+export function MapView({ variant, center, radiusM, pet, home = false, handle, onCenterChange, onRadiusChange, radiusLimits, height, children, ref }: Props) {
+  const [map, setMap] = useState<L.Map | null>(null);
   const big = variant === 'large';
+  const interactive = big;
+  const muted = pet?.status === 'no_signal';
+  const position = pet?.position ?? null;
 
-  let px = cx;
-  let py = cy;
-  if (pet?.position && center) {
-    const o = offsetM(center, pet.position);
-    const m = big ? 40 : 22;
-    // No mapa grande, a coluna da direita fica livre para os botões flutuantes.
-    px = Math.min(w - (big ? 84 : m), Math.max(m, cx + o.x * scale));
-    py = Math.min(h - m, Math.max(m, cy - o.y * scale));
-  }
+  // Chaves primitivas: o polling devolve objetos novos mesmo sem mudança.
+  const areaKey = center ? `${center.lat},${center.lng},${radiusM}` : '';
+  const petKey = position ? `${position.lat},${position.lng}` : '';
 
-  const ringStroke = muted ? '#9AA2AE' : 'var(--blue)';
-  const pr = big ? 15 : 9;
-  const color = pet ? PET_COLOR[pet.status] : 'var(--blue)';
+  const userMoved = useRef(false);
+  const fromMap = useRef<string | null>(null);
+  const prev = useRef<{ area: string; pet: string } | null>(null);
 
-  // Ponto da borda do círculo na direção do animal (rastro tracejado quando fora).
-  const ang = Math.atan2(py - cy, px - cx);
-  const edgeX = cx + Math.cos(ang) * ring;
-  const edgeY = cy + Math.sin(ang) * ring;
+  const fit = useCallback(
+    (animate: boolean) => {
+      if (!map) return;
+      const [top, right, bottom, left] = PADDING[variant];
+      if (center) {
+        const r = Math.max(radiusM, 1);
+        const b = L.latLngBounds([moveM(center, -r, -r), moveM(center, r, r)]);
+        if (position) b.extend(position);
+        map.fitBounds(b, { paddingTopLeft: [left, top], paddingBottomRight: [right, bottom], maxZoom: MAX_FIT_ZOOM, animate });
+      } else if (position) {
+        map.setView(position, POINT_ZOOM, { animate });
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [map, variant, areaKey, petKey],
+  );
+
+  useEffect(() => {
+    if (!map) return;
+    const p = prev.current;
+    prev.current = { area: areaKey, pet: petKey };
+    if (!p) return fit(false);
+    // Mudanças feitas no próprio mapa (arrastar casa/alça) não movem a câmera.
+    const areaChanged = p.area !== areaKey && areaKey !== fromMap.current;
+    const petChanged = p.pet !== petKey && !userMoved.current;
+    if (areaChanged || petChanged) fit(true);
+  }, [map, areaKey, petKey, fit]);
+
+  useImperativeHandle(ref, () => ({
+    recenter() {
+      userMoved.current = false;
+      fit(true);
+    },
+  }), [fit]);
+
+  useEffect(() => {
+    if (!map || !interactive) return;
+    const el = map.getContainer();
+    const mark = () => (userMoved.current = true);
+    el.addEventListener('pointerdown', mark);
+    el.addEventListener('wheel', mark, { passive: true });
+    return () => {
+      el.removeEventListener('pointerdown', mark);
+      el.removeEventListener('wheel', mark);
+    };
+  }, [map, interactive]);
+
+  const editableCenter = interactive && Boolean(onCenterChange);
+  const emitCenterRef = useRef<(c: LatLng) => void>(() => {});
+  emitCenterRef.current = (c) => {
+    fromMap.current = `${c.lat},${c.lng},${radiusM}`;
+    onCenterChange?.(c);
+  };
+  const emitCenter = (c: LatLng) => emitCenterRef.current(c);
+
+  useEffect(() => {
+    if (!map || !editableCenter) return;
+    const onClick = (e: L.LeafletMouseEvent) => emitCenterRef.current({ lat: e.latlng.lat, lng: e.latlng.lng });
+    map.on('click', onClick);
+    return () => {
+      map.off('click', onClick);
+    };
+  }, [map, editableCenter]);
+
+  // Enquanto arrasta, a alça segue o dedo; ao soltar, volta para o leste do círculo.
+  const [handlePos, setHandlePos] = useState<LatLng | null>(null);
+
+  const petMarkerIcon = useMemo(() => (pet ? petIcon(pet.status, pet.initial, big) : null), [pet?.status, pet?.initial, big]);
+  const homeMarkerIcon = useMemo(() => (home ? homeIcon(home, editableCenter) : null), [home, editableCenter]);
+
+  const trail = useMemo(() => {
+    if (pet?.status !== 'outside' || !center || !position) return null;
+    const o = offsetM(center, position);
+    const d = Math.hypot(o.x, o.y);
+    if (d <= radiusM) return null;
+    return [moveM(center, (o.x / d) * radiusM, (o.y / d) * radiusM), position];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pet?.status, areaKey, petKey]);
+
+  const initialView = center ? { center, zoom: POINT_ZOOM } : position ? { center: position, zoom: POINT_ZOOM } : FALLBACK_VIEW;
 
   return (
-    <div className="map-frame" style={{ height }}>
-      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="xMidYMid slice" aria-hidden="true">
-        <Background variant={variant} layout={layout} muted={muted} />
-        <circle
-          cx={cx}
-          cy={cy}
-          r={ring}
-          fill={muted ? 'none' : 'var(--blue)'}
-          fillOpacity={handle ? 0.1 : 0.08}
-          stroke={ringStroke}
-          strokeOpacity={muted || handle ? 1 : 0.55}
-          strokeWidth={handle ? 2.5 : big ? 2 : 1.5}
-          strokeDasharray={handle ? '8 6' : big ? '7 5' : '5 4'}
-        />
-        {handle && <circle cx={cx + ring} cy={cy} r="11" fill="#FFFFFF" stroke="var(--blue)" strokeWidth="3" />}
-        {home === 'small' && (
-          <>
-            <circle cx={cx} cy={cy} r={variant === 'form' ? 13 : 11} fill="#FFFFFF" stroke="var(--blue)" strokeWidth={variant === 'form' ? 3 : 2} />
-            <path d={`M${cx - 5} ${cy + 3}v-4l5-4 5 4v4z`} fill="var(--blue)" />
-          </>
-        )}
-        {home === 'large' && (
-          <>
-            <circle cx={cx} cy={cy} r="18" fill="var(--blue)" />
-            <path d={`M${cx - 8} ${cy + 5}v-6l8-6 8 6v6z`} fill="#FFFFFF" />
-          </>
-        )}
-        {pet && pet.status === 'outside' && (
-          <path
-            d={`M${edgeX} ${edgeY} Q${(edgeX + px) / 2} ${(edgeY + py) / 2 + 12} ${px - Math.cos(ang) * (pr + 1)} ${py - Math.sin(ang) * (pr + 1)}`}
-            stroke="var(--amber)"
-            strokeWidth="2"
-            strokeDasharray="3 4"
-            fill="none"
+    <div className={`map-frame map-frame--${variant}${muted ? ' map-frame--muted' : ''}`} style={{ height }}>
+      <MapContainer
+        ref={setMap}
+        center={initialView.center}
+        zoom={initialView.zoom}
+        zoomControl={false}
+        attributionControl={false}
+        dragging={interactive}
+        touchZoom={interactive}
+        scrollWheelZoom={interactive}
+        doubleClickZoom={interactive}
+        boxZoom={interactive}
+        keyboard={interactive}
+      >
+        <TileLayer url={TILE_URL} attribution={TILE_ATTRIBUTION} maxZoom={19} />
+        <AttributionControl position="bottomright" prefix={false} />
+
+        {center && (
+          <Circle
+            center={center}
+            radius={radiusM}
+            interactive={false}
+            pathOptions={{
+              color: muted ? GRAY : BLUE,
+              opacity: muted || handle ? 1 : 0.55,
+              weight: handle ? 2.5 : big ? 2 : 1.5,
+              dashArray: handle ? '8 6' : big ? '7 5' : '5 4',
+              fillColor: BLUE,
+              fillOpacity: muted ? 0 : handle ? 0.12 : 0.1,
+            }}
           />
         )}
-        {pet &&
-          (muted ? (
-            <>
-              <circle cx={px} cy={py} r={big ? 20 : 13} fill="#FFFFFF" stroke="#9AA2AE" strokeWidth="2" strokeDasharray="3 3" />
-              <circle cx={px} cy={py} r={big ? 14 : 8} fill="#9AA2AE" />
-            </>
-          ) : (
-            <>
-              <circle cx={px} cy={py} r={big ? 34 : 22} fill={color} fillOpacity={pet.status === 'outside' ? 0.2 : 0.16} />
-              <circle cx={px} cy={py} r={big ? 20 : 13} fill="#FFFFFF" />
-              <circle cx={px} cy={py} r={pr} fill={color} />
-            </>
-          ))}
-        {pet && (
-          <text
-            x={px}
-            y={py + (big ? 6 : 4)}
-            textAnchor="middle"
-            fontFamily="Plus Jakarta Sans, sans-serif"
-            fontSize={big ? 15 : 10}
-            fontWeight="800"
-            fill="#FFFFFF"
-          >
-            {pet.initial}
-          </text>
+
+        {trail && <Polyline positions={trail} interactive={false} pathOptions={{ color: AMBER, weight: 2, dashArray: '3 4' }} />}
+
+        {center && homeMarkerIcon && (
+          <Marker
+            position={center}
+            icon={homeMarkerIcon}
+            interactive={editableCenter}
+            draggable={editableCenter}
+            keyboard={false}
+            eventHandlers={{ drag: (e) => emitCenter((e.target as L.Marker).getLatLng()) }}
+          />
         )}
-      </svg>
-      {children}
+
+        {center && handle && (
+          <Marker
+            position={handlePos ?? moveM(center, radiusM, 0)}
+            icon={handleIcon}
+            interactive={interactive && Boolean(onRadiusChange)}
+            draggable={interactive && Boolean(onRadiusChange)}
+            keyboard={false}
+            eventHandlers={{
+              drag: (e) => {
+                const ll = (e.target as L.Marker).getLatLng();
+                setHandlePos(ll);
+                const [min, max] = radiusLimits ?? [1, Infinity];
+                const r = Math.min(max, Math.max(min, Math.round(distanceM(center, ll) / 10) * 10));
+                fromMap.current = `${center.lat},${center.lng},${r}`;
+                onRadiusChange?.(r);
+              },
+              dragend: () => setHandlePos(null),
+            }}
+          />
+        )}
+
+        {position && petMarkerIcon && <Marker position={position} icon={petMarkerIcon} interactive={false} keyboard={false} zIndexOffset={1000} />}
+      </MapContainer>
+      {children && <div className="map-overlay">{children}</div>}
     </div>
   );
 }

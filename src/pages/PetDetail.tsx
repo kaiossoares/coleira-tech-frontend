@@ -1,8 +1,9 @@
+import { useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '@/api';
 import type { PetOverview } from '@/api/types';
 import { BatteryIcon, CollarIcon, Icon } from '@/components/Icon';
-import { MapView } from '@/components/MapView';
+import { MapView, type MapViewHandle } from '@/components/MapView';
 import { PetAvatar, StatusPill } from '@/components/Status';
 import { ErrorState, Loading, useToast } from '@/components/States';
 import { ToggleRow } from '@/components/Toggle';
@@ -14,6 +15,7 @@ export default function PetDetail() {
   const { petId = '' } = useParams();
   const res = useResource(() => api.getPet(petId), [petId], 30_000);
   const toast = useToast();
+  const mapRef = useRef<MapViewHandle>(null);
 
   if (res.loading && !res.data) {
     return (
@@ -69,6 +71,7 @@ export default function PetDetail() {
   return (
     <div className="screen screen--flush screen--page" style={{ overflow: 'hidden' }}>
       <MapView
+        ref={mapRef}
         variant="large"
         height={420}
         center={safeArea?.center ?? null}
@@ -83,7 +86,10 @@ export default function PetDetail() {
           </span>
         </div>
         <div className="stack stack-8" style={{ position: 'absolute', right: 20, bottom: 44 }}>
-          <button type="button" className="icon-btn icon-btn--float" aria-label="Centralizar no animal" style={{ color: 'var(--blue)' }} onClick={() => res.reload()}>
+          <button type="button" className="icon-btn icon-btn--float" aria-label="Centralizar no animal" style={{ color: 'var(--blue)' }} onClick={() => {
+              mapRef.current?.recenter();
+              void res.reload();
+            }}>
             <Icon name="target" />
           </button>
           <button type="button" className="icon-btn icon-btn--float" aria-label="Ver histórico de trajeto" onClick={() => toast.show('Histórico de trajeto em breve.')}>

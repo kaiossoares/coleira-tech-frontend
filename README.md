@@ -4,8 +4,8 @@ App web mobile-first para acompanhar coleiras GPS de pets. Implementa as 10 tela
 "Coleira Tech — App": login, criar conta, início (vazio e com coleiras), cadastrar coleira,
 cadastrar animal, detalhe do animal, e editar animal, coleira e área segura.
 
-React 19 + TypeScript + Vite + React Router. Sem biblioteca de UI: os tokens do design estão em
-`src/styles/global.css`.
+React 19 + TypeScript + Vite + React Router + Leaflet (mapas). Sem biblioteca de UI: os tokens do
+design estão em `src/styles/global.css`.
 
 ## Rodando
 
@@ -63,10 +63,23 @@ docs/API.md     contrato para o backend
 
 ## Sobre o mapa
 
-`MapView` desenha o mapa ilustrado do design. O fundo (ruas, parque, água) é decorativo,
-mas o círculo da área segura e o marcador do animal são posicionados em escala a partir de
-`safeArea.center`, `radiusM` e `lastLocation`. Para usar um mapa real (Leaflet/OSM, Google Maps,
-Mapbox), troque a implementação de `src/components/MapView.tsx` mantendo as mesmas props.
+`MapView` (`src/components/MapView.tsx`) é um mapa real com [Leaflet](https://leafletjs.com) +
+[react-leaflet](https://react-leaflet.js.org), ambos open source, e tiles do OpenStreetMap.
+Tudo vem das coordenadas: `safeArea.center` + `radiusM` desenham o círculo e a casa, e
+`lastLocation` posiciona o animal.
+
+- **Tempo real:** o mapa só depende das props. Quando `pet.position` muda (hoje pelo polling de
+  30 s do `useResource`; no futuro por WebSocket/SSE), o marcador se move e a câmera acompanha.
+  Se o usuário arrastar ou der zoom no mapa grande, a câmera para de seguir até ele tocar em
+  "Centralizar" (`ref.recenter()`).
+- **Interação:** só o mapa grande é interativo. Os mapas dos cartões e do formulário são estáticos.
+  Em "Editar área segura", tocar no mapa ou arrastar a casa muda o centro, e arrastar a alça muda
+  o raio (`onCenterChange`, `onRadiusChange`).
+- **Tiles:** por padrão usa `tile.openstreetmap.org`, que serve para desenvolvimento, mas a
+  [política de uso](https://operations.osmfoundation.org/policies/tiles/) não permite tráfego alto.
+  Em produção, aponte `VITE_MAP_TILE_URL` (e `VITE_MAP_ATTRIBUTION`) para um servidor próprio
+  ou para um provedor compatível com Leaflet.
+
 A busca por endereço em "Editar área segura" envia o texto como `address` para o backend geocodificar.
 
 ## Scripts

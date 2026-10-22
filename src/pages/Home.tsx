@@ -59,8 +59,8 @@ export default function Home() {
         ))}
       </div>
 
-      {list.map((p, i) => (
-        <PetCard key={p.pet.id} data={p} layout={i} />
+      {list.map((p) => (
+        <PetCard key={p.pet.id} data={p} />
       ))}
 
       <Link to="/coleiras/nova" className="btn btn--dashed">
@@ -134,7 +134,7 @@ function ProfileMenu() {
   );
 }
 
-function PetCard({ data, layout }: { data: PetOverview; layout: number }) {
+function PetCard({ data }: { data: PetOverview }) {
   const { pet, collar, safeArea, lastLocation, status, distanceFromCenterM } = data;
   const href = `/animais/${pet.id}`;
   const outsideBy = safeArea && distanceFromCenterM !== null ? Math.max(0, distanceFromCenterM - safeArea.radiusM) : null;
@@ -143,7 +143,6 @@ function PetCard({ data, layout }: { data: PetOverview; layout: number }) {
     <article style={{ borderRadius: 22, background: '#fff', overflow: 'hidden', boxShadow: 'var(--shadow-card)' }}>
       <MapView
         variant="card"
-        layout={layout}
         height={140}
         center={safeArea?.center ?? null}
         radiusM={safeArea?.radiusM ?? 100}

@@ -40,6 +40,11 @@ export default function EditSafeArea() {
 
   const { pet, safeArea } = res.data;
 
+  function moveCenter(c: LatLng) {
+    setCenter(c);
+    setAddress(null);
+  }
+
   async function useMyLocation() {
     setLocating(true);
     const pos = await currentPosition();
@@ -67,7 +72,17 @@ export default function EditSafeArea() {
 
   return (
     <form className="screen screen--flush" onSubmit={save} noValidate style={{ overflow: 'hidden' }}>
-      <MapView variant="large" height={400} center={center} radiusM={radiusM} ringPx={20 + radiusM * 0.26} home="large" handle>
+      <MapView
+        variant="large"
+        height={400}
+        center={center}
+        radiusM={radiusM}
+        home="large"
+        handle
+        onCenterChange={moveCenter}
+        onRadiusChange={setRadiusM}
+        radiusLimits={[MIN, MAX]}
+      >
         <div className="row" style={{ position: 'absolute', left: 20, right: 20, top: 20, gap: 12 }}>
           <BackButton to={back} variant="float" />
           <div className="row" style={{ flex: 1, height: 44, padding: '0 14px', borderRadius: 14, background: '#fff', gap: 8, boxShadow: 'var(--shadow-float)' }}>
@@ -85,8 +100,8 @@ export default function EditSafeArea() {
             />
           </div>
         </div>
-        <span style={{ position: 'absolute', left: '50%', bottom: 28, transform: 'translateX(-50%)', padding: '8px 12px', borderRadius: 999, background: 'var(--ink)', color: '#fff', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>
-          O centro é a sua casa ou a busca acima
+        <span style={{ position: 'absolute', left: '50%', bottom: 48, transform: 'translateX(-50%)', padding: '8px 12px', borderRadius: 999, background: 'var(--ink)', color: '#fff', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', pointerEvents: 'none' }}>
+          Toque no mapa ou arraste a casa
         </span>
       </MapView>
 
